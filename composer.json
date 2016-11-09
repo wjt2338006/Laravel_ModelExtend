@@ -21,5 +21,12 @@
         "psr-4": {
             "Keith\\ModelExtend\\":"src/"
         }
-    }
+    },
+    "extra": {
+        "branch-alias": {
+            "master": "1.02-dev"
+        }
+    },
+    "minimum-stability": "master"
+
 }
