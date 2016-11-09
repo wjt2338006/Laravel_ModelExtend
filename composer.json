@@ -14,9 +14,6 @@
             "email": "ragpanda@163.com"
         }
     ],
-     "require": {
-        "php": ">=5.5.9"
-    },
     "autoload": {
         "psr-4": {
             "Keith\\ModelExtend\\":"src/"
@@ -26,7 +23,6 @@
         "branch-alias": {
             "master": "1.02-dev"
         }
-    },
-    "minimum-stability": "master"
+    }
 
 }
