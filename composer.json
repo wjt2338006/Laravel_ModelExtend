@@ -1,6 +1,10 @@
 {
-    "name": "ragpanda/laravel_model_extend",
-    "description": "a laravel model extend class",
+    "name": "ragpanda/model_extend",
+    "description": "a laravel model extend",
+    "type": "library",
+    "keywords": ["extend", "laravel", "model"],
+    "homepage": "https://github.com/wjt2338006/Laravel_ModelExtend",
+    "license": "MIT",
     "require": {
         "laravel/laravel": ">=5.2"
     },

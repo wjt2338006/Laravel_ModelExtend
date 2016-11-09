@@ -4,7 +4,7 @@
  * Date: 16-10-20
  */
 
-namespace App\Libraries\ModelExtend;
+namespace Keith\ModelExtend;
 
 
 class Quick

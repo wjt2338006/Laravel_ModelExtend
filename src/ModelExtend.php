@@ -6,7 +6,7 @@
  * git: https://github.com/wjt2338006/Laravel_ModelExtend.git
  */
 
-namespace App\Libraries\ModelExtend;
+namespace Keith\ModelExtend;
 
 
 use Illuminate\Support\Facades\DB;
