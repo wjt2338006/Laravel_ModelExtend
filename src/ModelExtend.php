@@ -2,7 +2,7 @@
 /**
  * User: keith.wang
  * Date: 16-10-11
- * V 1.02woyaochong
+ * V 1.03
  * git: https://github.com/wjt2338006/Laravel_ModelExtend.git
  */
 
@@ -11,6 +11,8 @@ namespace Keith\ModelExtend;
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Class ModelExtend
@@ -74,9 +76,31 @@ class ModelExtend
      */
     protected $afterSyncExec;
 
-    static protected $async = false;
+    /**
+     * 是否开启异步
+     * @var void
+     */
+    static public $async = false;
 
+    /**
+     * 连表计数器,内部使用
+     * @var int
+     */
     static protected $linkcal = 0;
+
+    /**
+     * json方式查询
+     * @var string
+     */
+    static protected $valSymbol = ":";
+
+    static protected $needMore = true;
+
+
+    const AddOperationSymbol = "add";
+    const UpdateOperationSymbol = "update";
+    const DelOperationSymbol = "del";
+
     /*
         $queryLimit
         |-sort = 排序字段
@@ -94,11 +118,12 @@ class ModelExtend
         |-link = []
             |-["name","selfFiled","connection.table.field1"["queryLimit"]] 如果name为空，那么数据将会嵌入当条，重复的会覆盖
             |- ...
+        |-or/and =[] //仿照MongoDB or and 复杂where条件可能需要
         |-resultConvert = function(&$dataArray){}
         |-pk = 手动设定主键，id字段将按照这个字段查询，仅在使用id的时候有效
         |-deleteEmpty =["name1","name2"...]那些如果为空删除
         |-first = true 只查询单条数据
-//        |-extra = function($queryLimit, $query){} //额外的运行时动态查询,这对于数据同步比较重要
+        |-custom = function($queryLimit,$query)
 
      */
 
@@ -111,11 +136,12 @@ class ModelExtend
      */
     static public function select($queryLimit, $query = null)
     {
-        //dump,("查询限制");
-        //dump,($queryLimit);
+
+
         if (empty($query))
         {
             $query = static::getQuery();
+            $originQuery = clone $query;
         }
         else
         {
@@ -124,8 +150,10 @@ class ModelExtend
                 $conData = self::compileConnectionString($query);
                 $query = static::getBuilder($conData["con"])->table($conData["table"]);
                 $queryLimit["pk"] = $conData["field"];
+                $originQuery = clone $query;
             }
         }
+
 
         //排序
         if (!empty($queryLimit["sort"]))  //自定义字段排序
@@ -156,6 +184,11 @@ class ModelExtend
             }
         }
 
+        if (!empty($queryLimit["custom"]) && is_callable($queryLimit["custom"]))
+        {
+            $queryLimit["custom"]($queryLimit, $query);
+        }
+
         //按主键id查找某条记录
         if (!empty($queryLimit["id"]))
         {
@@ -172,19 +205,31 @@ class ModelExtend
             static::selectWhereIn($queryLimit["whereIn"], $query);
         }
 
-//        foreach($queryLimit as $v)
-//        {
-//            if($v[0] == :)
-//        }
-
+        if (!empty($queryLimit["or"]))
+        {
+            static::selectWhereOrAnd("or", $queryLimit["or"], $query);
+        }
+        if (!empty($queryLimit["and"]))
+        {
+            static::selectWhereOrAnd("and", $queryLimit["and"], $query);
+        }
+        //json查询扩展
+        static::handleJsonQuery($queryLimit, $query);
 
         //自定义方法
         static::selectExtra($queryLimit, $query);
 
         $returnData = [];
         //计算出符合条件的查询总条数,除开num和limit
-        $numQuery = clone $query;//克隆出来不适用原来的对象
-        $returnData["total"] = $numQuery->select(DB::raw('count(*) as num'))->first()->num;
+        $numQuery = clone $query;//克隆出来不用原来的对象
+
+        $con = null;
+        if (isset($conData["con"]))
+        {
+            $con = $conData["con"];
+        }
+        $returnData["total"] = $numQuery->select(static::getBuilder($con)->raw('count(*) as num'))->first()->num;
+        unset($con);
 
 
         //根据开始和每页条数筛选结果
@@ -226,104 +271,83 @@ class ModelExtend
             $query->select(DB::raw($select));
         }
 
+        //dump($query->toSql());//todo dump
 
         //是否使用laravel默认的分页机制,并处理结果
         $data = [];
         if (!empty($queryLimit["paginate"]))
         {
-
-            $page = $query->paginate($queryLimit["paginate"]);
-            $returnData["page"] = $page;
+            $returnData["page"] = $query->paginate($queryLimit["paginate"]);
         }
-
-
-        $data = [];
-        //判断是否是单条数据
-        if (!empty($queryLimit["first"]))
-        {
-            $data = (array)($query->first());
-            if (!empty($queryLimit["link"]) && !empty($data))
-            {
-
-                static::linkTable($data, $queryLimit["link"]);
-            }
-            //删除没有指定字段的项目
-            if (!empty($queryLimit["deleteEmpty"]))
-            {
-                foreach ($queryLimit["deleteEmpty"] as $v)
-                {
-                    if (empty($singleData[$v]))
-                    {
-                        $data = [];
-                    }
-                }
-            }
-            //对接收到的数据进行处理
-            if (!empty($queryLimit["resultConvert"]) && is_callable($queryLimit["resultConvert"]))
-            {
-                $queryLimit["resultConvert"]($data);
-            }
-            //查询后数据过滤
-            if (static::$linkcal == 0)
-            {
-                static::selectFilter($data); //过滤数据
-            }
-
-
-        }
-        else //多条数据
+        if (empty($queryLimit["first"]))
         {
             $data = $query->get();
             foreach ($data as $k => $v)
             {
                 $data[$k] = (array)$v;
             }
+        }
+        else
+        {
+            $data = [];
+            $data[] = (array)($query->first());
+        }
 
-            //dump,("查询构造将会执行的sql");
-            //dump,($query->toSql());
-            //执行连表
-            if (!empty($queryLimit["link"]) && !empty($data))
+        //执行连表
+        if (!empty($queryLimit["link"]) && !empty($data))
+        {
+            static::$linkcal++;
+            static::linkTable($data, $queryLimit["link"]);
+            static::$linkcal--;
+        }
+
+
+        $canUseData = [];
+        foreach ($data as $k => &$singleData)
+        {
+            //对接收到的数据进行处理
+            if (!empty($queryLimit["resultConvert"]) && is_callable($queryLimit["resultConvert"]))
             {
-                static::$linkcal++;
-                static::linkTable($data, $queryLimit["link"]);
-                static::$linkcal--;
+                $queryLimit["resultConvert"]($singleData);
+                if (empty($singleData))
+                {
+                    continue;
+                }
             }
 
-
-            $canUseData = [];
-            foreach ($data as $k => &$singleData)
+            //删除没有指定字段的项目
+            if (!empty($queryLimit["deleteEmpty"]))
             {
-                //删除没有指定字段的项目
-                if (!empty($queryLimit["deleteEmpty"]))
+                Helper::isArray($queryLimit["deleteEmpty"], "deleteEmpty必须是一个数组");
+                $isDel = false;
+                foreach ($queryLimit["deleteEmpty"] as $v)
                 {
-                    $isDel = false;
-                    foreach ($queryLimit["deleteEmpty"] as $v)
+                    if (empty($singleData[$v]))
                     {
-                        if (empty($singleData[$v]))
-                        {
-                            $isDel = true;
-                            break;
-                        }
-                    }
-                    if ($isDel)
-                    {
-                        continue;
+                        $isDel = true;
+                        break;
                     }
                 }
-                //对接收到的数据进行处理
-                if (!empty($queryLimit["resultConvert"]) && is_callable($queryLimit["resultConvert"]))
+                if ($isDel)
                 {
-                    $queryLimit["resultConvert"]($singleData);
+                    continue;
                 }
-
-                //查询后数据过滤
-                if (static::$linkcal == 0)
-                {
-                    static::selectFilter($singleData); //过滤数据
-                }
-                $canUseData[] = $singleData;
             }
+
+            //查询后数据过滤
+            if (static::$linkcal == 0)
+            {
+                static::selectFilter($singleData); //过滤数据
+            }
+            $canUseData[] = $singleData;
+        }
+        if (empty($queryLimit["first"]) || $queryLimit["first"] != true)
+        {
             $data = $canUseData;
+        }
+        else
+        {
+            empty($canUseData[0]) ? $data = [] : $data = $canUseData[0];
         }
 
 
@@ -331,6 +355,19 @@ class ModelExtend
         $returnData["status"] = 200;
         $returnData["message"] = "成功获取到数据";
         $returnData["data"] = $data;
+
+
+        if (sizeof($data) == 0 && !empty($queryLimit["start"]) && $queryLimit["start"] > 0)
+        {
+            $queryLimit["start"] = 0;
+            $returnData = static::select($queryLimit, $originQuery);
+            $returnData["resetStart"] = true;
+        }
+        else
+        {
+            $returnData["resetStart"] = false;
+
+        }
         return $returnData;
 
     }
@@ -341,16 +378,23 @@ class ModelExtend
      * ModelExtend constructor.
      * @param $id
      */
-    public function __construct($id)
+    public function __construct($id, $allowEmpty = false)
     {
         $this->id = $id;
-        $this->syncFromDataBase();
-//        if (empty(static::$syncMap))
-//        {多个Model公用会把其他的map来拿
-        static::$syncMap = static::loadSyncMap();
-
-//        }
-
+        try
+        {
+            $this->syncFromDataBase();
+        } catch (\PDOException $e)
+        {
+            if (!$allowEmpty)
+            {
+                throw $e;
+            }
+            else
+            {
+                Log::info("一条数据被允许作为空存在" . static::$connection . "|" . static::$table . "| id=" . $id);
+            }
+        }
     }
 
 
@@ -362,11 +406,6 @@ class ModelExtend
      */
     public static function add($data)
     {
-//        if (empty(static::$syncMap))
-//        {
-
-        static::$syncMap = static::loadSyncMap();
-//        }
         $query = static::getQuery();
         static::addExtra($data, $query);
 
@@ -422,7 +461,7 @@ class ModelExtend
         $query = static::getQuery();
         $this->deleteExtra($query);
 
-        $r = $query->where(static::$primaryKey, $this->id)->delete();
+        $r = $this->locationData($query)->delete();
     }
 
 
@@ -440,19 +479,40 @@ class ModelExtend
         $query = static::getQuery();
         $this->updateExtra($data, $query);
 
-        $r = $query->where(static::$primaryKey, $this->id)->update($data);
+        $r = $this->locationData($query)->update($data);
 
     }
 
 
     /**
-     * 批量删除数据，按照queryLimit查询，删除匹配到的查询
+     * 批量删除数据，按照queryLimit查询，删除匹配到的查询,support Link
      * @param $queryLimit //匹配查询限制
      * @param null $query //可以选择传入一个构造器，自定义连接和表
      * @param null $key //自定义连接和表以后，需要指定主键
+     * @return int
+     * @throws \Exception
      */
     public static function deleteMultiple($queryLimit, $query = null, $key = null)
     {
+
+        if (empty($queryLimit))
+        {
+            //throw new \Exception("危险,querlimit为空,这样可能删除所有的数据");
+        }
+        if (empty($query))
+        {
+            $query = static::getQuery();
+        }
+        if (is_string($query))
+        {
+            $conData = self::compileConnectionString($query);
+            $query = static::getBuilder($conData["con"])->table($conData["table"]);
+            $queryLimit["pk"] = $conData["field"];
+            if (empty($key))
+            {
+                $key = $queryLimit["pk"];
+            }
+        }
         if (empty($key))
         {
             if (!empty($queryLimit["pk"]))
@@ -465,26 +525,64 @@ class ModelExtend
             }
 
         }
-
         $r = static::select($queryLimit, $query);
-        //dump,("批量删除这些数据");
-        //dump,($r);
+        if (empty($r["data"]))
+        {
+            return 0;
+        }
+        $count = 0;
+        if (empty($r["data"][0]))
+        {
+            $tmp = $r["data"];
+            $r["data"] = [];
+            $r["data"][] = $tmp;
+        }
         foreach ($r["data"] as $v)
         {
+
             if (!empty($query))
             {
                 $q = clone $query;
-                $q->where($key, $v[$key])->delete();
+                $delResult = $q->where($key, $v[$key])->delete();
             }
             else
             {
-                static::getQuery()->where($key, $v[$key])->delete();
+                $delResult = static::getQuery()->where($key, $v[$key])->delete();
+            }
+            if ($delResult)
+            {
+                $count++;
+            }
+
+            //11-28新加入了连表删除功能
+            if (!empty($queryLimit["link"]))
+            {
+                //如果是单条连表条件,转换成多条
+                if (!is_array($queryLimit["link"][0]))
+                {
+                    $tmp = $queryLimit["link"];
+                    $queryLimit["link"] = [];
+                    $queryLimit["link"][] = $tmp;
+
+                }
+                //连表查询每一条 将匹配的删除
+                foreach ($queryLimit["link"] as $link)
+                {
+                    $conData = static::compileConnectionString($link[2]);
+                    $queryNew = static::getBuilder($conData["con"])->table($conData["table"]);
+
+                    isset($link[3]) ? $queryLimitNew = $link[3] : $queryLimitNew = [];
+                    $queryLimitNew["pk"] = $conData["field"];
+
+                    $queryLimitNew[":" . $conData["field"]] = $v[$link[1]];
+                    static::deleteMultiple($queryLimitNew, $queryNew, $conData["field"]);
+                }
             }
 
         }
+        return $count;
 
     }
-
 
     /**
      * 按照QueryLimit多更新，匹配数据会被更新
@@ -495,6 +593,7 @@ class ModelExtend
      */
     public static function updateMultiple($queryLimit, $updateData, $query = null, $key = null)
     {
+        //todo update support link update  notice sync Use this function
         if (empty($key))
         {
             if (!empty($queryLimit["pk"]))
@@ -509,8 +608,6 @@ class ModelExtend
         }
 
         $r = static::select($queryLimit, $query);
-        //dump,("批量跟新匹配数据");
-        //dump,($r);
         foreach ($r["data"] as $v)
         {
             if (!empty($query))
@@ -527,205 +624,314 @@ class ModelExtend
 
 
 
+//    /**
+//     * 按照QueryLimit多更新，匹配数据会被更新
+//     * @param $queryLimit //限制
+//     * @param $updateData //更新数据
+//     * @param null $query //可以选择传入一个构造器，自定义连接和表
+//     * @param null $key //自定义连接和表以后，需要指定主键
+//     * @return int
+//     * //todo 需要测试
+//     */
+//    public static function updateMultiple($queryLimit, $updateData, $query = null, $key = null)
+//    {
+//        /**
+//         * 将一条数据转为可插入的,去掉link
+//         * @param $queryLimit //查询
+//         * @param $updateData //单条数据
+//         * @return mixed
+//         */
+//        $resultToCanInsert = function ($queryLimit, $updateData)
+//        {
+//            if (!empty($queryLimit["link"]))
+//            {
+//                foreach ($updateData as $k => $singleField)
+//                {
+//                    foreach ($queryLimit["link"] as $link)
+//                    {
+//                        if (!empty($link[0]))
+//                        {
+//                            unset($updateData[$k]);
+//                        }
+//                    }
+//                }
+//                return $updateData;
+//            }
+//            else
+//            {
+//                return $updateData;
+//            }
+//        };
+//        $handleLinkToMulti = function ($queryLimit)
+//        {
+//            if (!is_array($queryLimit["link"][0]))
+//            {
+//                $tmp = $queryLimit["link"];
+//                $queryLimit["link"] = [];
+//                $queryLimit["link"][] = $tmp;
+//
+//            }
+//            return $queryLimit;
+//        };
+//
+//
+//
+//        if (empty($query))
+//        {
+//            $query = static::getQuery();
+//        }
+//
+//        if (is_string($query))
+//        {
+//            $conData = self::compileConnectionString($query);
+//            $query = static::getBuilder($conData["con"])->table($conData["table"]);
+//            $queryLimit["pk"] = $conData["field"];
+//            if (empty($key))
+//            {
+//                $key = $queryLimit["pk"];
+//            }
+//        }
+//        if (empty($key))
+//        {
+//            if (!empty($queryLimit["pk"]))
+//            {
+//                $key = $queryLimit["pk"];
+//            }
+//            else
+//            {
+//                $key = static::$primaryKey;
+//            }
+//
+//        }
+//
+//        $r=0;
+//        //如果是低纬度数据,转换成高纬度的
+//        if (!isset($updateData[0])||!is_array($updateData[0])){
+//            $tmp = $updateData;
+//            $updateData = [];
+//            $updateData[] = $tmp;
+//        }
+//        foreach ($updateData as $singleUpdateData)
+//        {
+//            $insertData = $resultToCanInsert($queryLimit, $singleUpdateData);
+//            if(isset($singleUpdateData[$key]))
+//            {
+//                $r += $query->where($key, "=", $singleUpdateData[$key])->update($insertData);
+//            }
+//            else
+//            {
+//                $singleUpdateData[$key] =  $query->insertGetId($insertData);
+//                $r +=1;
+//            }
+//
+//
+//            if (!empty($queryLimit["link"]))
+//            {
+//                $handleLinkToMulti($queryLimit);
+//                foreach ($queryLimit["link"] as $link)
+//                {
+//                    if (!empty($link[3]))       //获取下一层的link
+//                    {
+//                        $newLimit = $link[3];
+//                    }
+//                    else
+//                    {
+//                        $newLimit = [];
+//                    }
+//
+//
+//                    if (!empty($link[0]))       //获取下一层的修改数据
+//                    {
+//                        $newNextData = $singleUpdateData[$link[0]];
+//                    }
+//                    else
+//                    {
+//                        $newNextData = ModelExtend::select([
+//                            "first" => true,
+//                            "id" => $singleUpdateData[$link[1]]
+//                        ], $link[2])["data"];
+//                        $tmp = [];
+//                        foreach( $newNextData as $k=>$v)
+//                        {
+//                            $tmp[$k] = $singleUpdateData[$k];
+//                        }
+//                        $newNextData = $tmp;
+//                    }
+//
+//                    //加一个下一级联系数据
+//                    $conData = static::compileConnectionString($link[2]);
+//                    $newLimit[":".$conData["field"]] = $newNextData[$conData["field"]];
+//
+//                    static::updateMultiple($newLimit, $newNextData, $link[2]);
+//                }
+//            }
+//        }
+//        return $r;
+//
+//    }
 
 
-    //同步函数
-    /*
-         同步分成
-        1.条件  通过两套条件，匹配不同的数据
-            本方条件直接通过id匹配，对端条件
-            |-"connection.table.主键" = $queryLimit
-            |-"connection.table.主键" = $queryLimit
-            ......
-            条件只有运行时才知道，所以模型只设定规则
-            匹配发生在数据被修改前
-
-        2.策略  匹配后，选择是删除重建,还是原地址修改，大多数情况下可以通过判断来解决这个问题
-            |-添加，在添加后执行，检查老数据库是否有对应数据，如果有，执行更新，没有，添加
-            |-更新，在更新后执行，会传入老的数据用来匹配，匹配项将会进行更新，queryLimit将会作为条件
-            |-删除，在删除后执行，会传入老的数据用来匹配，匹配项会被删除
-        3.映射
-            映射分为可修改和不可修改的
-            |-connection.table.主键
-                |-field1 = selfField1
-            |-connection.table.主键
-                |-field1= [selfField2 ,function(&$data){}] //如果需要对数据修改，将会把本条数据传入
-
-            设置映射在配置文件中
-            实现映射在mapData函数中
-
-
-         */
     /**
      * 同步添加，同步添加会根据映射关系去被同步库添加数据
      * @param $data //需要填入的数据，只支持单条数据
      * @param null $async // 是否启用异步
      * @return ModelExtend //返回这条数据生成的模型
      */
-    public static function syncAdd($data, $async = null)
-    {
-        if ($async === null)
-        {
-            $async = static::$async;
-        }
+//    public static function syncAdd($data, $async = null)
+//    {
+//        if ($async === null)
+//        {
+//            $async = static::$async;
+//        }
+//        static::$syncMap = static::loadSyncMap();
+//
 //        if (empty(static::$syncMap))
 //        {
-        static::$syncMap = static::loadSyncMap();
+//            //执行本库添加
+//            $model = static::add($data);
+//            return $model;
 //        }
-        //dump,("执行同步增加～～～～～～～～～～～～～～～～!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-        if (empty(static::$syncMap))
-        {
-            //执行本库添加
-            $model = static::add($data);
-            return $model;
-        }
-        $model = static::add($data);
-        $model->loadSyncCondition();
-        if ($async == false)
-        {
-            $model->asyncRunAdd();
-        }
-        else
-        {
-            $model->asyncSend($model->id, $model->syncCondition, "add");
-        }
-
-        //dump,("执行同步增加结束～～～～～～～～～～～～～～～～！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！");
-        return $model;
-
-    }
-
-    /**
-     * 异步运行同步，同步的同步数据也会使用这个函数，异步运行的需要在异步端运行这个函数
-     * 添加不需要匹配条件
-     */
-    public function asyncRunAdd()
-    {
-        foreach (static::$syncMap as $k => $v)
-        {
-            //将数据匹配map取出，将数据映射上
-            $insertData = $this->mapData($k);
-            //dump,("映射数据");
-            //dump,($insertData);
-
-            if ($insertData)
-            {
-                //获取需要同步数据库链接
-                $connectionData = static::compileConnectionString($k);
-                $query = static::getBuilder($connectionData["con"])
-                    ->table($connectionData["table"]);
-                $r = $query->insert($insertData);
-                //dump,("新增同步结果");
-                //dump,($r);
-            }
-        }
-    }
+//        $model = static::add($data);
+//        static::loadSyncCondition($model);
+//        if ($async == false)
+//        {
+//            $model->asyncRunAdd();
+//        }
+//        else
+//        {
+//            $model->asyncSend($model->id, $model->syncCondition, "add");
+//        }
+//
+//        return $model;
+//
+//    }
+//
+//    /**
+//     * 异步运行同步，同步的同步数据也会使用这个函数，异步运行的需要在异步端运行这个函数
+//     * 添加不需要匹配条件
+//     */
+//    public function asyncRunAdd()
+//    {
+//        $sonExecList = [];
+//        foreach (static::$syncMap as $k => $v)
+//        {
+//            //将数据匹配map取出，将数据映射上
+//            $insertData = $this->mapData($k);
+//
+//            if ($insertData)
+//            {
+//                //获取需要同步数据库链接
+//                $connectionData = static::compileConnectionString($k);
+//                $query = static::getBuilder($connectionData["con"])
+//                    ->table($connectionData["table"]);
+//                $r = $query->insert($insertData);
+//            }
+//        }
+//    }
 
     /**
      * 同步更新，更新会根据条件匹配被同步库，如果没有数据，则会按照映射新加入，有数据会按照映射更新
      * @param $updateData //需要更新的参数数组
      * @param null $async //是否需要启用异步同步
+     * @param array $argList
      */
-    public function syncUpdate($updateData, $async = null)
+    public function syncUpdate($updateData, $argList = [], $async = null)
     {
         if ($async === null)
         {
             $async = static::$async;
         }
-        //dump,("开始同步更新～～～～～～～～～～～～～～～～～～～————————————————————————————————————————————————");
-        $this->loadSyncCondition();
-        $otherLimit = $this->syncCondition;
+        //有时候可能需要进行一些设置操作,必须在数据还存在时候进行
+        if (!$async)
+        {
+            static::loadSyncCondition($this, $argList);
+        }
+
 
         //执行本库修改
         $this->update($updateData);
         $this->syncFromDataBase();//获得最新数据
 
-        if (empty($otherLimit))
-        {
-            return;
-        }
 
         //遍历每个表的规则
         if ($async == false)
         {
-            $this->asyncRunUpdate($this->syncCondition, false);
+            $this->asyncRunUpdate();
         }
         else
         {
-            $this->asyncSend($this->id, $this->syncCondition, "update");
+            $this->asyncSend($this->id, $argList, static::UpdateOperationSymbol);
         }
 
-        //dump,("结束同步更新～～～～～～～～～～～～～～～～！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！");
 
     }
 
     /**
      * 异步运行同步，同步的同步数据也会使用这个函数，异步运行的需要在异步端运行这个函数
-     * @param $condition //条件
-     * @param bool $isStr true//条件是否是一个字符串条件配置，通常在异步端调用时都是一个字符串
      */
-    public function asyncRunUpdate($condition, $isStr = true)
+    public function asyncRunUpdate()
     {
-        if ($isStr)
-        {
-            //会覆盖条件
-            $this->conditionFromString($condition);
-        }
-        else
-        {
-            $this->syncCondition = $condition;
-        }
-        //dump,($this->data);
+
+
         while (sizeof($this->syncCondition) > 0)
         {
-
+            $sonExecList = [];
             foreach ($this->syncCondition as $k => $v)
             {
-                //dump,("获取规则----------------------------------------");
-                //dump,($k);
-                //根据规则匹配数据
-                $resultData = static::matchData($k, $v);
-//                dump,("匹配数据");
-//                dump,($resultData);
-
-                //将数据匹配map取出，将数据映射上,得到需要插入到老数据库的东西
-                $insertData = $this->mapData($k);
-                //dump,("获取映射数据");
-                //dump,($insertData);
-                if ($insertData)
+                try
                 {
 
-                    //获取需要同步数据库链接
-                    $connectionData = static::compileConnectionString($k);
-                    $query = static::getBuilder($connectionData["con"])
-                        ->table($connectionData["table"]);
+                    //match 将数据匹配map取出，将数据映射上,得到需要插入到老数据库的东西
+                    $resultData = static::matchData($k, $v);
+                    //map
+                    $insertData = $this->mapData($k, $resultData);
 
-                    //被同步方有没有匹配数据
-                    if (sizeof($resultData["data"]) == 0)
+                    if ($insertData)
                     {
-                        //dump,("更新 无源数据 同步加入数据");
-                        //没有该匹配数据的行为，一次纯天然的添加
 
-                        //执行添加
-                        $query->insert($insertData);
+                        //获取需要同步数据库链接
+                        $connectionData = static::compileConnectionString($k);
+                        $query = static::getBuilder($connectionData["con"])
+                            ->table($connectionData["table"]);
+
+                        //被同步方有没有匹配数据
+                        if (sizeof($resultData) == 0)
+                        {
+                            //没有该匹配数据的行为，一次纯天然的添加
+                            //执行添加
+                            $query->insert($insertData);
+                        }
+                        else
+                        {
+                            //注意这里会把主键注入到里面方便使用功能
+                            $v["pk"] = $connectionData["field"];
+                            //可能其他的表已经添加了这一条数据，我们需要原处更新
+                            //执行更新
+//                            $query->where($connectionData["field"],"=",$resultData[$connectionData["field"]])->update($insertData);
+
+                            static::updateMultiple($v, $insertData, $query, $connectionData["field"]);
+                        }
                     }
-                    else
+                    $thisObj = $this;
+                    if (isset($this->afterSyncExec[$k]) && is_callable($this->afterSyncExec[$k]))
                     {
-                        //dump,("更新 有源数据 同步更新数据");
-                        //注意这里会把主键注入到里面方便使用功能
-                        $v["pk"] = $connectionData["field"];
-                        //可能其他的表已经添加了这一条数据，我们需要原处更新
-                        //执行更新
-//                        dump,("ModelExtend758");dump,($insertData);
-                        static::updateMultiple($v, $insertData, $query, $connectionData["field"]);
+                        $sonExecList[] = function () use ($thisObj, $k)
+                        {
+                            $thisObj->afterSyncExec[$k]($thisObj->syncCondition, $thisObj);
+                        };
                     }
-                }
-                if (isset($this->afterSyncExec[$k]) && is_callable($this->afterSyncExec[$k]))
+                } catch (\Exception $e)
                 {
-                    $this->afterSyncExec[$k]($this->syncCondition, $this);
+                    Log::error(Helper::handleException("更新同步时条件出错 跳过执行$k ", $e, true));
+                } finally
+                {
+                    unset($this->syncCondition[$k]);
                 }
-                unset($this->syncCondition[$k]);
+            }
 
+            foreach ($sonExecList as $sonExec)
+            {
+                $sonExec();
             }
         }
 
@@ -734,23 +940,19 @@ class ModelExtend
 
     /**
      * 同步删除，会根据条件匹配，匹配后删除
+     * @param array $argList
      * @param null $async 异步执行
      */
-    public function syncDelete($async = null)
+    public function syncDelete($argList = [], $async = null)
     {
         if ($async === null)
         {
             $async = static::$async;
         }
 
-        //dump,("同步删除～～～～～～～～～～～～～～～————————————————————————————————————————————————————————————");
-        $this->loadSyncCondition();
-        if (empty($this->syncCondition))
+        if (!$async)
         {
-            //dump,("没有条件");
-            //执行本库删除
-            //$this->delete();
-            return;
+            static::loadSyncCondition($this, $argList);
         }
 
         //执行本库删除
@@ -758,75 +960,107 @@ class ModelExtend
 
         if ($async == false)
         {
-            static::asyncRunDelete($this->syncCondition, false);
+            $thisObj = $this;
+            static::asyncRunDelete($thisObj);
         }
         else
         {
-            $this->asyncSend($this->id, $this->syncCondition, "del");
+            $this->asyncSend($this->id, $argList, static::DelOperationSymbol);
         }
 
-        //dump,("同步删除结束～～～～～～～～～～～～～！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！");
     }
 
-    //todo async不支持递归条件
     /**
      * 异步运行同步，同步的同步数据也会使用这个函数，异步运行的需要在异步端运行这个函数
      * 注意删除的异步是静态的,因为在异步端数据可能已经被删除了,async不支持递归条件
-     * @param $condition //条件
-     * @param bool $isStr //条件是否是一个字符串条件配置，通常在异步端调用时都是一个字符串
+     * @param $thisObj // virtual object, not have data because that have been deleted maybe
      */
-    public static function asyncRunDelete($condition, $isStr = true)
+    public static function asyncRunDelete($thisObj)
     {
-        if ($isStr)
-        {
-            //回复该条件
-            $condition = static::conditionFromStringStatic($condition);
-        }
 
-
-        $otherLimit = $condition;
         //遍历每个表的规则
-        foreach ($otherLimit as $k => $v)
+        while (sizeof($thisObj->syncCondition) > 0)
         {
-            //dump,("规则 " . $k);
-            //根据规则匹配数据
-            $resultData = static::matchData($k, $v);
-            //dump,("匹配数据 ");
-            //dump,($resultData);
-
-
-            //不再需要映射
-
-            //获取需要同步数据库链接
-            $connectionData = static::compileConnectionString($k);
-            $query = static::getBuilder($connectionData["con"])
-                ->table($connectionData["table"]);
-
-            //被同步方有没有匹配数据
-            if (sizeof($resultData["data"]) == 0)
+            $sonExecList = [];
+            foreach ($thisObj->syncCondition as $k => $v)
             {
-                //dump,("没有匹配数据");
-                //匹配失败,没有数据会被删除
-            }
-            else
-            {
-                //dump,("有匹配数据");
-                $v["pk"] = $connectionData["field"];
-                //将匹配的数据删除
-                static::deleteMultiple($v, $query, $connectionData["field"]);
+                try
+                {
+                    //根据规则匹配数据
+                    $resultData = static::matchData($k, $v);
+
+                    //不再需要映射
+
+
+                    //获取需要同步数据库链接
+                    $connectionData = static::compileConnectionString($k);
+                    $query = static::getBuilder($connectionData["con"])
+                        ->table($connectionData["table"]);
+
+                    //被同步方有没有匹配数据
+                    if (sizeof($resultData) == 0)
+                    {
+                        Log::info("no match data, stop delete" . json_encode($v));
+                        //匹配失败,没有数据会被删除
+                    }
+                    else
+                    {
+                        $v["pk"] = $connectionData["field"];
+                        //将匹配的数据删除
+                        static::deleteMultiple($v, $query, $connectionData["field"]);
+                    }
+
+                    if (isset($thisObj->afterSyncExec[$k]) && is_callable($thisObj->afterSyncExec[$k]))
+                    {
+                        $sonExecList[] = function () use ($thisObj, $k)
+                        {
+                            $thisObj->afterSyncExec[$k]($thisObj->syncCondition, $thisObj);
+                        };
+                    }
+                } catch (\Exception $e)
+                {
+                    Log::error(Helper::handleException("Delete同步时条件出错 跳过执行$k ", $e, true));
+                } finally
+                {
+                    unset($thisObj->syncCondition[$k]);
+                }
+
             }
 
+            foreach ($sonExecList as $sonExec)
+            {
+                $sonExec();
+            }
         }
     }
 
     /**
      * 如果需要异步化，请从新实现这个函数，发送异步请求
      * @param int $id //当前这条数据主键
-     * @param string $condition //条件字符串
+     * @param $argList
      * @param string $opr //动作 如add update del
      */
-    public function asyncSend($id, $condition, $opr)
+    public static function asyncSend($id, $argList, $opr)
     {
+
+    }
+
+    public static function asyncRecv($id, $argList, $opr)
+    {
+        $modelObj = null;
+        if ($opr == static::DelOperationSymbol)
+        {
+            $modelObj = new static($id, true);
+            static::loadSyncCondition($modelObj, $argList);
+            static::asyncRunDelete($modelObj);
+        }
+        else
+        {
+            $modelObj = new static($id);
+            static::loadSyncCondition($modelObj, $argList);
+            $modelObj->asyncRunUpdate();
+        }
+
 
     }
 
@@ -843,25 +1077,14 @@ class ModelExtend
 
     条件和映射要一一对应
     下面是示范，一个模型如果需要同步，应该覆盖该方法
+    在这里返回初设条件，这些条件是同类型模型通用
     */
     /**
-     * 在这里返回初设条件，这些条件是同类型模型通用
+     * @param $thisObj //会传入本方对象
      */
-    public function loadSyncCondition()
+    public static function loadSyncCondition($thisObj, $argList = [])//todo
     {
-        /*
-        return
-            [
-                "where" =>
-                    [
-                        ["or", "field", "=", "value"],
-                        ["and", "field", "=", "value"],
-                    ]
-            ];
-        $this->syncCondition = [
-            "tour.product.product_id" => $productLimit
-        ];
-        */
+        static::loadSyncMap();
     }
 
 
@@ -874,10 +1097,10 @@ class ModelExtend
      */
     public function appendSyncCondition($connection, $queryLimit, $afterExec = null)
     {
-        $this->syncCondition[$connection] = $queryLimit;
+        $this->syncCondition[$connection] = $queryLimit;//条件可序列化的部分放入syncCondition
         if (is_callable($afterExec))
         {
-            $this->afterSyncExec[$connection] = $afterExec;
+            $this->afterSyncExec[$connection] = $afterExec;//匿名函数不可序列化部分放入afterSyncExec
         }
     }
 
@@ -922,9 +1145,13 @@ class ModelExtend
     }
 
 
-
     //辅助函数
 
+
+    public static function getOriginDB()
+    {
+        return app("db");
+    }
 
     /**
      * 获取本连接表的查询
@@ -961,11 +1188,17 @@ class ModelExtend
      */
     public function syncFromDataBase()
     {
-        $this->data = (array)(static::getQuery()->where(static::$primaryKey, $this->id)->first());
+        $this->data = (array)$this->locationData(static::getQuery())->first();
         if (empty($this->data))
         {
             throw new \Exception("没有这一条记录," . static::$table . " id=" . $this->id);
         }
+    }
+
+    protected function locationData($q)
+    {
+        return $q->where(static::$primaryKey, $this->id);
+
     }
 
     /**
@@ -973,16 +1206,25 @@ class ModelExtend
      * @param $data //过滤的数据
      * @param $fieldList //需要过滤字段
      * @param bool $isForbid true //删除这些字段，false保留这些字段
+     * @param null $messageSet   //自定义错误消息
      * @return array //过滤后的数据
      * @throws \Exception
      */
-    public static function filter(&$data, $fieldList, $isForbid = false)
+    public static function filter(&$data, $fieldList, $isForbid = false,$messageSet = [])
     {
         try
         {
             $isForbid ? $result = $data : $result = [];
-            foreach ($fieldList as $v)
+            $checkList = [];
+            foreach ($fieldList as $k => $v)
             {
+
+                if (!is_int($k))
+                {
+                    $checkList[$k] = $v;
+                    $v = $k;
+                }
+
                 if (!isset($data[$v]))
                 {
                     continue;
@@ -994,6 +1236,24 @@ class ModelExtend
                 else
                 {
                     $result[$v] = $data[$v];
+                }
+
+
+            }
+
+            if (!empty($checkList))
+            {
+                $validator = Validator::make($data,$checkList,$messageSet);
+                if($validator->fails())
+                {
+                    $messages = $validator->errors();
+                    $msgList = [];
+                    foreach ($messages->all() as $message) {
+                        $msgList[] = $message;
+                    }
+
+                    throw new ValidationException(json_encode($msgList));
+
                 }
             }
             $data = $result;
@@ -1114,11 +1374,19 @@ class ModelExtend
      * @param $dayStr //如 1970-01-02
      * @return int
      */
-    public static function timeFromDayStr($dayStr, $format = 'Y-m-d H:i:s')
+    public static function timeFromDayStr($dayStr, $format = 'Y-m-d')
     {
         $zone = new \DateTimeZone(env("TIMEZONE", "Asia/Chongqing"));
-        $date = \DateTime::createFromFormat($format,
-            $dayStr . " 00:00:00", $zone)->getTimestamp();
+        $date = \DateTime::createFromFormat($format . " H:i:s",
+            $dayStr . " 00:00:00", $zone);
+        if ($date == false)
+        {
+            $date = 0;
+        }
+        else
+        {
+            $date = $date->getTimestamp();
+        }
         return $date;
     }
 
@@ -1127,11 +1395,21 @@ class ModelExtend
      * @param $str //如 1970-01-02 00:00:00
      * @return int
      */
-    public static function timeFromSecondStr($str)
+    public static function timeFromSecondStr($str, $format = 'Y-m-d H:i:s')
     {
         $zone = new \DateTimeZone(env("TIMEZONE", "Asia/Chongqing"));
-        $date = \DateTime::createFromFormat('Y-m-d H:i:s',
-            $str, $zone)->getTimestamp();
+        $date = \DateTime::createFromFormat($format,
+            $str, $zone);
+        if ($date == false)
+        {
+            throw  new \Exception("time conver error $str  =>  $format !");
+        }
+        else
+        {
+            $date = $date->getTimestamp();
+        }
+        return $date;
+
         return $date;
     }
 
@@ -1206,6 +1484,7 @@ class ModelExtend
      * @param $willMatch //需要匹配的链接，配置中的名字
      * @param $queryLimit //匹配限制，规则同select
      * @return array
+     * @throws \Exception
      */
     protected static function matchData($willMatch, $queryLimit)
     {
@@ -1215,7 +1494,8 @@ class ModelExtend
             $query = static::getBuilder($connectionData["con"])
                 ->table($connectionData["table"]);
             $queryLimit["pk"] = $connectionData["field"];
-            $resultData = static::select($queryLimit, $query);
+            $queryLimit["first"] = true;
+            $resultData = static::select($queryLimit, $query)["data"];
             return $resultData;
         } catch (\Exception $e)
         {
@@ -1228,10 +1508,10 @@ class ModelExtend
     /**
      * 建立新老映射
      * @param $willMap //要使用的映射关系，配置中的名字
-     * @return array    //返回映射后可以插入的数据
+     * @return array    //返回映射后可以插入的数据 如果是使用默认逻辑 返回映射数据 自定逻辑返回false
      * @throws \Exception
      */
-    protected function mapData($willMap)
+    protected function mapData($willMap, $matchData = [])
     {
         if (!isset(static::$syncMap[$willMap]))
         {
@@ -1243,7 +1523,7 @@ class ModelExtend
         $insertData = [];
         if (is_callable($map))
         {
-            $map($this->data, $insertData, $this);
+            $map($matchData, $insertData, $this);
             return false;
         }
         foreach ($map as $mapK => $mapV)
@@ -1262,7 +1542,6 @@ class ModelExtend
             {
                 throw new \Exception(Helper::handleException("映射$willMap 时出错：" . $mapK, $e, true));
             }
-
 
         }
         return $insertData;
@@ -1331,7 +1610,6 @@ class ModelExtend
         return json_decode($conditionStr, true);
     }
 
-    //select会调用到的函数
 
     /**
      * @param $where
@@ -1344,28 +1622,149 @@ class ModelExtend
         {
             throw new \Exception("where语句，条件必须是一个数组");
         }
+        if (!isset($where[0]) || !is_array($where[0]))
+        {
+            $tmp = $where;
+            $where = [];
+            $where[] = $tmp;
+        }
+
         foreach ($where as $v)
         {
             if ($v[0] == "or")
             {
                 $query->orWhere($v[1], $v[2], $v[3]);
-            }
-            else
-            {
-                if ($v[0] == "and")
-                {
-                    $query->where($v[1], $v[2], $v[3]);
-                }
-                else
-                {
-                    $query->where($v[0], $v[1], $v[2]);
-                }
+                continue;
             }
 
+            if ($v[0] == "and")
+            {
+                $query->where($v[1], $v[2], $v[3]);
+                continue;
+            }
+
+            $query->where($v[0], $v[1], $v[2]);
 
         }
     }
     //ok
+    /*
+    "or"=>
+    [
+        "or"=>[
+            ["product_id","1"],
+           ["age","=","asa'],
+         ],
+        "and"=>[
+             ["product_id","1"],
+            ["age","=","asa'],
+        ],
+
+    ]
+
+
+     */
+    protected static function selectWhereOrAnd($key, $orAndlimit, $query)
+    {
+        if (isset($orAndlimit[0]))
+        {
+            if (empty($orAndlimit[0]) || !is_array($orAndlimit))
+            {
+                throw new \Exception("错误的limit" . $orAndlimit);
+            }
+
+            foreach ($orAndlimit as $k => $limit)
+            {
+                if (!is_int($k))
+                {
+                    continue;
+                }
+
+                if (!isset($limit[0]))
+                {
+                    if (isset($limit["and"]))
+                    {
+                        $function = function ($query) use ($limit)
+                        {
+                            static::selectWhereOrAnd("and", $limit["and"], $query);
+                        };
+
+                    }
+                    else
+                    {
+                        $function = function ($query) use ($limit)
+                        {
+                            static::selectWhereOrAnd("or", $limit["or"], $query);
+                        };
+                    }
+                    if ($key == "and")
+                    {
+                        $query->where($function);
+                    }
+                    if ($key == "or")
+                    {
+                        $query->orWhere($function);
+                    }
+
+                }
+                else
+                {
+                    $field = $limit[0];
+                    if (sizeof($limit) == 2)
+                    {
+                        $symbol = "=";
+                        $value = $limit[1];
+                    }
+                    else
+                    {
+                        $symbol = $limit[1];
+                        $value = $limit[2];
+                    }
+
+                    if ($key == "or")
+                    {
+                        $query->orWhere($field, $symbol, $value);
+                    }
+                    else
+                    {
+                        $query->where($field, $symbol, $value);
+                    }
+                }
+
+            }
+
+        }
+        if (isset($orAndlimit["or"]) || isset($orAndlimit["and"]))
+        {
+            if (isset($orAndlimit["or"]))
+            {
+                $function = function ($query) use ($orAndlimit)
+                {
+
+                    static::selectWhereOrAnd("or", $orAndlimit["or"], $query);
+                };
+            }
+            if (isset($orAndlimit["and"]))
+            {
+                $function = function ($query) use ($orAndlimit)
+                {
+                    static::selectWhereOrAnd("and", $orAndlimit["and"], $query);
+
+                };
+            }
+
+            if ($key == "and")
+            {
+                $query->where($function);
+            }
+            if ($key == "or")
+            {
+                $query->orWhere($function);
+            }
+        }
+    }
+
+
     /**
      * @param $where
      * @param $query
@@ -1398,12 +1797,66 @@ class ModelExtend
 
     }
 
-    /*
-   |-link = []
-           |-["name","selfFiled","connection.table.field1"["queryLimit"]]
-           |- ...
+    /**
+     * 支持类似与mongoDB的json查询
+     * @param $queryLimit
+     * @param $query
+     */
+    protected static function handleJsonQuery($queryLimit, $query)
+    {
+        $val = [];
+        foreach ($queryLimit as $k => $limit)
+        {
+            $sp = substr($k, 0, 1);
+            if ($sp != static::$valSymbol)
+            {
+                continue;
+            };
 
-   */
+            $k = substr($k, 1);
+            $val[$k] = $limit;
+
+        }
+
+        //每一个json条件之间形成and关系
+        $query->where(function ($query) use ($val)
+        {
+            foreach ($val as $k => $v)
+            {
+                if (is_array($v))
+                {
+                    if (!empty($v))
+                    {
+                        if (isset($v[0]))
+                        {
+                            $query->whereIn($k, $v);
+                        }
+                        else
+                        {
+                            foreach ($v as $instruct => $x)
+                            {
+                                if ($instruct == ":like")
+                                {
+                                    $query->where($k, "like", $x);
+                                }
+                            }
+                        }
+
+                    }
+
+                }
+                else
+                {
+                    $query->where($k, "=", $v);
+                }
+
+            }
+
+        });
+
+
+    }
+
     /**
      * 连表查询调用方法
      * @param $data
@@ -1412,6 +1865,14 @@ class ModelExtend
      */
     protected static function linkTable(&$data, &$links)
     {
+        if (empty($data))
+        {
+            return;
+        } // 12/12 if data is null will be repeat without limit
+        if (!is_array($links))
+        {
+            throw new \Exception("link条件必须为一个数组");
+        }
 
         $linkField = [];//存对面的域
         $linkLimit = [];//按照连接存限制
@@ -1421,15 +1882,21 @@ class ModelExtend
         $linkResult = [];//结果
         $linkSelf = [];//存self field
 
+
+        //对于单条的link可以简写
+        if (!is_array($links[0]))
+        {
+            $tmp = $links;
+            $links = [];
+            $links[] = $tmp;
+        }
+
+
         //遍历每一条规则,准备阶段
         foreach ($links as $link)
         {
             try
             {
-                if (isset($data[$link[0]]))
-                {
-                    throw new \Exception("数据已经存在这个字段 $link[0] 不能再将其作为子数据名");
-                }
                 $name = $link[0];
                 $selfFiled = $link[1];
                 $connectionStr = $link[2];
@@ -1438,7 +1905,7 @@ class ModelExtend
                 $connectionData = static::compileConnectionString($connectionStr);
                 if (isset($linkConnection[$connectionStr]))
                 {
-                    $connectionStr .= ":" . rand(0, 9999);
+                    $connectionStr .= ":" . rand(0, 999999);
                 }//多连接查询的情况,两个连接会重叠在一起
                 $linkConnection[$connectionStr] = static::getBuilder($connectionData["con"])
                     ->table($connectionData["table"]);
@@ -1527,16 +1994,13 @@ class ModelExtend
                 {
                     foreach ($self as &$singleSelf)
                     {
-                        if ($needDivide != null)
-                        {
-                            $singleSelf[$needDivide] = [];
-                        }
                         foreach ($next as &$nextSingle)
                         {
                             if ($nextSingle[$nextK] == $singleSelf[$selfK])
                             {
                                 if ($first)
                                 {
+
                                     $handleSingleData($nextSingle, $singleSelf, $needDivide, false);
                                 }
                                 else
@@ -1547,18 +2011,18 @@ class ModelExtend
                             }
 
                         }
+                        if ($needDivide != null && empty($singleSelf[$needDivide]))//2016-11-10修改位置,如果放在以前的位置上面,会导致当条件为该值时无法进行匹配
+                        {
+                            $singleSelf[$needDivide] = [];
+                        }
                     }
 
                 }
                 //单条
                 else
                 {
-                    if ($needDivide != null)
-                    {
-                        $self[$needDivide] = [];
-                    }
-                    //下一级数据条数
 
+                    //下一级数据条数
                     foreach ($next as &$nextSingle)
                     {
                         if ($nextSingle[$nextK] == $self[$selfK])
@@ -1576,6 +2040,10 @@ class ModelExtend
 
                         }
 
+                    }
+                    if ($needDivide != null && empty($singleSelf[$needDivide]))
+                    {
+                        $singleSelf[$needDivide] = [];
                     }
                 }
 
@@ -1605,6 +2073,26 @@ class ModelExtend
         //总的查询数  m[n]表示第n层的link数   m[0] * m[1] * m[2] ......
 
 
+    }
+
+    public static function getField($con = null)
+    {
+        if(empty($con))
+        {
+            $q= static::getBuilder();
+        }
+        else
+        {
+            $q = static::getBuilder($con,true);
+        }
+
+        $data = $q->select("show columns from ".static::$table);
+        $result = [];
+        foreach($data as $v)
+        {
+            $result[] = $v->Field;
+        }
+        return $result;
     }
 
 

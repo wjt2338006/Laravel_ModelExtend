@@ -1,4 +1,4 @@
-# ModelExtend 文档 1.01.7
+# ModelExtend 文档 1.03
 ## 更新
 ####1.01.1 2016-10-19   
 连表递归改为迭代，查询次数为  (m[n]表示第n层的link数)   m[0] * m[1] * m[2] ......  
@@ -32,6 +32,20 @@ select删除选项修复bug
 修复link二级查询时候first的问题
 
 ####1.02   2016-11-9
+
+####1.02.1 2016-11-14 ready
+允许创建一个允许数据为空的MOdel
+支持以键名where查询字段
+
+
+####1.03 2016-11-28
+累积文档更新,同步语法根据票务实践有更改,更加符合实际需要
+加入部分Mongo语法
+批量连表删除
+Todo:
+数据同步相关方法的文档尚未更新
+mongo语法可以添加whereIn
+
 
 
 ## 简述
@@ -67,7 +81,19 @@ select删除选项修复bug
         static protected $primaryKey = "product_id";
     }
 ```
-    
+很多时候工程项目不允许使用其他模型,也可以通过动态配置来灵活使用
+```
+ModelExtend::select(
+            [
+                "where" => 
+                [
+                    ["product_id", "=", $data["product_id"]],
+                    ["product_option_value_id", "=", $data["product_option_value_id"]]
+                ],
+                "first" => true
+            ], "ticket.product_attribute_override.product_attribute_override_id")["data"];
+            //除了limit参数,第二个参数可以传入一个 `数据库连接.表.主键(或者能标识的键)` 函数按照这个配置执行下面的查询
+```
     
 ## 查询
 ### 基础查询
@@ -79,7 +105,7 @@ $queryLimit =
              "start" => 0,      //从第几条开始
              "num" => 10,       //需要多少条
              "sort" => "provider_id",   //按照什么字段排序
-             "where"=>          //where条件
+             "where"=>          //where条件 如果是单条,可抑制嵌套一维数组
              [
                  ["and","provider_id","=",4],
                  ["or","provider_id","=",5]
@@ -96,26 +122,29 @@ dump($data["data"]);
 支持以下参数，参数不填的话会使用默认值或者不设条件。
 ```
      $queryLimit
+     $queryLimit
      |-sort = 排序字段
      |-desc = 是否倒序true/false
-     |-id = 按照某个id查询     //ud
+     |-id = 按照主键对某个id查询     
      |-start = 查询开始条目
      |-num = 查询多少条
-     |-select = 需要哪些字段，不填是所有,如["xx as new","count(*) a snum"]
-     |-paginate = 是否使用laravel默认分页机制，需要使用填入每页条数 （不可以和连表一起使用，数据结构不同，第二维是对象，不建议使用）
+     |-select = ["xx as new","count(*) a snum"]需要哪些字段，不填是所有
+     |-paginate = 是否使用laravel默认分页机制，需要使用填入每页条数，返回数据中会有page这个参数，是laravel返回的分页对象
      |-where = [] //ud
          |- ["or","field","=","value"] //第一个and或者or是无效的（单个 and和 or是没有意义的）
-         |- ["field,"=","value] //默认使用and语法
+         |- ["and","field,"=","value]
          |- ...
      |-whereIn = ["id",[1,2,3]]  //组合使用whereIn是加载where末尾，如果最后一个条件是or，那么很可能不是你要的效果，最好不要混用 //ud
      |-link = []
-         |-["name","selfFiled","connection.table.field1"["queryLimit"]]
+         |-["name","selfFiled","connection.table.field1",$queryLimit] 如果name为空，那么数据将会嵌入当条，重复的会覆盖,需要多层级连表再传下一级别的limit
          |- ...
-     |-resultConvert = function(&$dataArray){} //对结果进行转换，会传入本条结果的引用
+     |-or/and =[] //仿照MongoDB or and 复杂where条件可能需要,下面详细介绍
+     |-resultConvert = function(&$dataArray){}
      |-pk = 手动设定主键，id字段将按照这个字段查询，仅在使用id的时候有效
-     |-deleteEmpty =["name1","name2"...]那些如果为空删除,删除条数时total不会跟着删除。（前端分页的时候不建议使用这个功能）
-     |-first = true 只查询第一条数据,可以和link一起使用,效果最佳
-     
+     |-deleteEmpty =["name1","name2"...]那些如果为空删除,注意这个会影响total计数,返回的total不会减去被delete的数据
+     |-first = true 只查询单条数据,可以link组合得到单条连表嵌入的效果
+     |-:字段      对某个字段筛选 一个快捷的where语句 比如 [":product_id"]=15 相当于sql where product_id=15  多个字段之间关系是and
+     |-custom = function($queryLimit,$query)  //传入一个匿名函数进行自定
 ```
 返回结果数组 
 ```
@@ -155,8 +184,27 @@ return
     ];
     SomeModel::select($queryLimit);
 ```
-上面是一个例子，连表查询了两次，获取数据后，新的子数据在本数据的value底下，每一条value底下有一个operation字段  
-里面有有匹配的operation数据:
+上面是一个例子，连表查询了两次，获取数据后，新的子数据在本数据的value底下，每一条value底下有一个operation字段,里面有有匹配的operation数据  
+在底层实现上,没有对每条数据都建立一条查询子表,而是将一个层级所有条件收集起来进行一次查询,再将数据分配给匹配的父表数据,这样查询次数可以控制在:  
+      m[0] * m[1] * m[2] ...... m[n]   (m[n]表示嵌套的第n层的link数)
+      正常foreach实现  
+      m[0]  *  k[0] * m[1] * k[1]......... m[n] * k[n]  (k[n]表示这一层查询出来的数据数,在上面.这个值是1)
+      
+### 复杂条件查询
+对于复杂的条件 ,需要使用多个括号来约束条件的,可以这样使用
+```
+        ModelExtend::select([
+             "or" => [
+                 ["and" => [["product_id", 1], ["product_id", 2]]],
+                 ["provider_id","=",1]
+             ]
+         ], "ticket.ticket_product.product_id");
+```
+这样最后生成的sql语句是  
+```
+     "select * from `ticket_product_extra_image` where `weight` = ? and `product_id` = ? and (`product_id` = ? or `url` = ?) limit 10"
+```
+     
 ### 查询扩展
    我们可以通过继承selectExtra方法来自定义查询构造参数，注意会传入两个参数，$queryLimit必须使用引用&，不然不会起作用
 ```

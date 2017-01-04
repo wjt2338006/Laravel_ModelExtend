@@ -17,7 +17,7 @@ class Helper
      * @param \Exception $e
      * @param bool $needMsg
      * @return string
-     * @throws ModelExtendException
+     * @throws \Exception
      */
     public static function handleException($msg, \Exception $e, $needMsg = false)
     {
@@ -34,18 +34,28 @@ class Helper
     }
 
     /**
-     * 数组类型判断
+     * 数组类型判断,关联数组并不能通过判断
      * @param $v
      * @param string $msg
-     * @throws TypeMatchingException
+     * @throws \Exception
      */
-    public static function isArray($v, $msg = "")
+    public static function isArray($v, $msg = "type is not array!")
     {
-        if (!is_array($v))
+        if (is_array($v) && isset($v[0]))
         {
-            $msg = "非数组类型 " . $msg;
-            throw new TypeMatchingException($msg);
+            return;
         }
+
+        throw new \Exception($msg);
+    }
+
+    public static function emptyArray($array)
+    {
+        if (empty($array))
+        {
+            return [];
+        }
+        return $array;
     }
 
 
@@ -53,23 +63,25 @@ class Helper
      * 空判断
      * @param $v
      * @param string $msg
-     * @throws TypeMatchingException
+     * @throws \Exception
      */
     public static function notEmpty($v, $msg = "")
     {
         if (empty($v))
         {
             $msg = "空类型 " . $msg;
-            throw new TypeMatchingException($msg);
+            throw new \Exception($msg);
         }
 
     }
 
+
     /**
+     * 废弃:建议使用ModelExtend中的Filter
      * 按照laravel框架的方法检查字段
      * @param $data //字段
      * @param $condition //laravel验证器规则
-     * @throws ModelExtendException
+     * @throws \Exception
      */
     public static function checkData($data, $condition)
     {
@@ -83,7 +95,7 @@ class Helper
             {
                 $err .= $message;
             }
-            throw  new ModelExtendException($err);
+            throw  new \Exception($err);
         }
     }
 }
