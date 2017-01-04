@@ -6,6 +6,7 @@
     "homepage": "https://github.com/wjt2338006/Laravel_ModelExtend",
     "license": "MIT",
     "require": {
+        "php": ">=5.5.9",
         "laravel/laravel": ">=5.2"
     },
     "authors": [
@@ -18,12 +19,6 @@
         "psr-4": {
             "Keith\\ModelExtend\\":"src/"
         }
-    },
-    "extra": {
-        "branch-alias": {
-            "dev-master": "1.03-dev"
-        }
-    },
-    "minimum-stability": "dev"
+    }
 
 }
