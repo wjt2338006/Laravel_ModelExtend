@@ -99,13 +99,3 @@ class Helper
         }
     }
 }
-
-class TypeMatchingException extends \Exception
-{
-
-}
-
-class ModelExtendException extends \Exception
-{
-
-}

@@ -9,7 +9,6 @@
 namespace Keith\ModelExtend;
 
 
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
@@ -229,7 +228,7 @@ class ModelExtend
             $con = $conData["con"];
         }
         $returnData["total"] = $numQuery->select(static::getBuilder($con)->raw('count(*) as num'))->first()->num;
-        unset($con);
+
 
 
         //根据开始和每页条数筛选结果
@@ -268,7 +267,7 @@ class ModelExtend
             {
                 $select = "*";
             }
-            $query->select(DB::raw($select));
+            $query->select(static::getBuilder($con)->raw($select));
         }
 
         //dump($query->toSql());//todo dump
@@ -1206,8 +1205,9 @@ class ModelExtend
      * @param $data //过滤的数据
      * @param $fieldList //需要过滤字段
      * @param bool $isForbid true //删除这些字段，false保留这些字段
-     * @param null $messageSet   //自定义错误消息
+     * @param array|null $messageSet //自定义错误消息
      * @return array //过滤后的数据
+     * @throws ValidationException
      * @throws \Exception
      */
     public static function filter(&$data, $fieldList, $isForbid = false,$messageSet = [])
@@ -1251,8 +1251,9 @@ class ModelExtend
                     foreach ($messages->all() as $message) {
                         $msgList[] = $message;
                     }
-
-                    throw new ValidationException(json_encode($msgList));
+                    $msgList =  json_encode($msgList);
+                    $r = response()->json(["status"=>500,"message"=>$msgList]);
+                    throw new ValidationException($validator,$r);
 
                 }
             }
@@ -1260,6 +1261,10 @@ class ModelExtend
             return $result;
         } catch (\Exception $e)
         {
+            if($e instanceof ValidationException)
+            {
+                throw $e;
+            }
             throw new \Exception("ModelExtend::filter 无法过滤数据 " . $e->getMessage() . " " . $e->getFile() . " " . $e->getLine());
         }
 
@@ -1865,7 +1870,7 @@ class ModelExtend
      */
     protected static function linkTable(&$data, &$links)
     {
-        if (empty($data))
+        if (empty($data)||empty($data[0]))
         {
             return;
         } // 12/12 if data is null will be repeat without limit
